@@ -2,9 +2,19 @@
 
 轻量的 Mac 菜单栏磁盘用量日记。每小时记录启动磁盘的已用、可用和总容量，点击菜单栏容量环查看变化。
 
+源码仓库：[Mappedinfo/DiskPulse](https://github.com/Mappedinfo/DiskPulse)。
+
 原生 Swift 6、SwiftUI、Swift Charts、系统 SQLite；没有第三方依赖、后台服务器或联网请求。支持 macOS 14 及以上，构建产物对应构建机器的 CPU 架构。
 
 ## 安装与使用
+
+下载源码后安装：
+
+```bash
+git clone https://github.com/Mappedinfo/DiskPulse.git
+cd DiskPulse
+./Install.command
+```
 
 双击项目中的 `Install.command`，自动安装到 `~/Applications/DiskPulse.app` 并启动。已有 `dist/DiskPulse.app` 时直接安装；首次从源码安装需要 Xcode Command Line Tools 及 Swift 6。也可将已构建的 `.app` 拖进“应用程序”后双击打开。
 
@@ -48,11 +58,11 @@
 
 ## 项目状态
 
-当前版本为 0.1.0，本文件是项目当前状态入口。功能覆盖小时采样、本地持久化、容量趋势、菜单栏短动画、暂停与手动记录、CSV 导出、可选登录启动和应用打包。
+当前版本为 0.1.0。功能覆盖小时采样、本地持久化、容量趋势、菜单栏短动画、暂停与手动记录、CSV 导出、可选登录启动和应用打包。
 
-2026-10-27 已通过 release 构建、8 项核心测试、应用签名校验、本机真实采样／小时去重／CSV 读回和数据库完整性检查；安装后的菜单栏进程已写入首条真实记录。实测环境为 Apple Silicon、macOS 27.0.1、Swift 6.4。应用约 736 KB，ZIP 约 255 KB；启动后的单次空闲抽样约 27 MB 常驻内存，不能视为长期性能测量。
+2026-10-27 已通过 release 构建、8 项核心测试、应用签名校验、本机真实采样／小时去重／CSV 读回和数据库完整性检查；本机安装与首次自动记录也已验证。实测环境为 Apple Silicon、macOS 27.0.1、Swift 6.4。应用约 736 KB，ZIP 约 255 KB；启动后的单次空闲抽样约 27 MB 常驻内存，不能视为长期性能测量。
 
-未做界面验收，界面由用户手动检查。登录启动及跨休眠、跨整点的长期行为需在实际使用中观察；核心时间边界和持久化逻辑已通过测试。当前仓库为本地项目，尚未配置 GitHub 远端或发布版本。
+尚未完成界面交互验收，以及登录启动、跨休眠、跨整点的长期运行验证；核心时间边界和持久化逻辑已通过测试。当前公开源码，安装包可在本机构建，尚未发布 GitHub Release。
 
 ## 系统接口依据
 
