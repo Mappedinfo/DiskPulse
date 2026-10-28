@@ -9,11 +9,12 @@ struct DashboardView: View {
     @ObservedObject var model: AppModel
     @State private var days = 7
     @State private var showSettings = false
+    @State private var metric: HistoryMetric = .estimatedUsed
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var visible: [DiskSample] {
         let start = Date().addingTimeInterval(-Double(days) * 86_400)
-        return model.samples.filter { $0.date >= start }
+        return model.samples.filter { $0.date >= start && metric.bytes(for: $0) != nil }
     }
 
     var body: some View {
@@ -77,13 +78,15 @@ struct DashboardView: View {
     }
 
     private func capacity(_ sample: DiskSample) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
         HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("已使用").font(.system(size: 13)).foregroundStyle(.secondary)
+                Text(sample.availableBytes == nil ? "物理占用" : "已使用（估算）")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
                 Text(CapacityFormat.bytes(sample.usedBytes))
                     .font(.system(size: 32, weight: .semibold, design: .rounded))
                     .monospacedDigit().minimumScaleFactor(0.7).lineLimit(1)
-                Text("可用 \(CapacityFormat.bytes(sample.freeBytes))")
+                Text("可用 \(CapacityFormat.bytes(sample.displayAvailableBytes))")
                     .font(.system(size: 13)).foregroundStyle(.secondary)
                 Text("总容量 \(CapacityFormat.bytes(sample.totalBytes))")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -101,15 +104,30 @@ struct DashboardView: View {
             .frame(width: 82, height: 82)
             .accessibilityLabel("磁盘占用 \(sample.fraction.formatted(.percent))")
         }.padding(.vertical, 4)
+            DisclosureGroup("容量明细") {
+                VStack(alignment: .leading, spacing: 5) {
+                    LabeledContent("物理占用", value: CapacityFormat.bytes(sample.physicalUsedBytes))
+                    LabeledContent("纯空闲", value: CapacityFormat.bytes(sample.freeBytes))
+                    if let reclaimable = sample.estimatedReclaimableBytes {
+                        LabeledContent("可回收估算", value: CapacityFormat.bytes(reclaimable))
+                        Text("可用空间含系统可回收空间；已用为总容量减可用估算，可能与系统设置的刷新值略有差异。")
+                    } else {
+                        Text("此记录没有系统可用空间估算，当前显示物理占用。")
+                    }
+                }.font(.system(size: 12)).foregroundStyle(.secondary).padding(.top, 6)
+            }.font(.system(size: 12))
+        }
     }
 
     private var history: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("容量趋势").font(.system(size: 14, weight: .semibold))
+                Picker("统计口径", selection: $metric) {
+                    ForEach(HistoryMetric.allCases) { item in Text(item.title).tag(item) }
+                }.pickerStyle(.menu).labelsHidden().fixedSize()
                 Spacer()
                 if let first = visible.first, let last = visible.last, visible.count > 1 {
-                    Text("区间 \(CapacityFormat.change(last.usedBytes - first.usedBytes))")
+                    Text("区间 \(CapacityFormat.change(metric.bytes(for: last)! - metric.bytes(for: first)!))")
                         .font(.system(size: 12)).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
@@ -124,14 +142,14 @@ struct DashboardView: View {
                     .font(.system(size: 13)).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 130)
             } else {
-                Chart(HistoryPoint.make(from: visible)) { point in
+                Chart(HistoryPoint.make(from: visible, metric: metric)) { point in
                     LineMark(
                         x: .value("时间", point.sample.date),
-                        y: .value("已用 GB", Double(point.sample.usedBytes) / 1_000_000_000),
+                        y: .value("容量 GB", Double(point.bytes) / 1_000_000_000),
                         series: .value("连续记录", point.segment)
                     ).foregroundStyle(accent).lineStyle(StrokeStyle(lineWidth: 2))
                     PointMark(x: .value("时间", point.sample.date),
-                              y: .value("已用 GB", Double(point.sample.usedBytes) / 1_000_000_000))
+                              y: .value("容量 GB", Double(point.bytes) / 1_000_000_000))
                         .foregroundStyle(accent).symbolSize(visible.count < 3 ? 30 : 8)
                 }
                 .chartXScale(domain: Date().addingTimeInterval(-Double(days) * 86_400)...Date())
@@ -145,15 +163,19 @@ struct DashboardView: View {
                 }
                 .chartYAxis { AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) }
                 .frame(height: 130)
-                .accessibilityLabel("过去 \(days) 天的磁盘已用容量，\(visible.count) 条记录，单位 GB")
+                .accessibilityLabel("过去 \(days) 天的\(metric.title)，\(visible.count) 条记录，单位 GB")
             }
             Text(visible.count < 2 ? "每小时留一条记录，趋势会慢慢长出来。" : "\(visible.count) 条小时记录 · 休眠或退出期间留空")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+            if metric == .estimatedUsed && model.samples.contains(where: { $0.availableBytes == nil }) {
+                Text("旧记录仅有物理占用，可切换上方口径查看。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
         }
     }
 
     private var yDomain: ClosedRange<Double> {
-        let values = visible.map { Double($0.usedBytes) / 1_000_000_000 }
+        let values = visible.compactMap { metric.bytes(for: $0).map { Double($0) / 1_000_000_000 } }
         let low = values.min() ?? 0
         let high = values.max() ?? 1
         let padding = max(1, (high - low) * 0.2)

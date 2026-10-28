@@ -76,7 +76,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         button.title = model.showPercentage
             ? (model.latest.map { " " + $0.fraction.formatted(.percent.precision(.fractionLength(0))) } ?? " —")
             : ""
-        let value = model.latest.map { "已用 \(CapacityFormat.bytes($0.usedBytes))，可用 \(CapacityFormat.bytes($0.freeBytes))" } ?? "等待第一条记录"
+        let value = model.latest.map {
+            let label = $0.availableBytes == nil ? "物理占用" : "已用（估算）"
+            return "\(label) \(CapacityFormat.bytes($0.usedBytes))，可用 \(CapacityFormat.bytes($0.displayAvailableBytes))"
+        } ?? "等待第一条记录"
         button.toolTip = "DiskPulse · \(value)\(model.paused ? " · 已暂停" : "")"
         button.setAccessibilityLabel(button.toolTip)
     }

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SQLite3
 @testable import DiskPulseCore
 
 private func utcCalendar() -> Calendar {
@@ -82,8 +83,106 @@ private func withStore(_ body: (URL) throws -> Void) throws {
 
 @Test func csvPreservesExactBytesAndUTCTime() throws {
     let csv = CSVExport.text([try sample("2026-10-27T10:01:00Z")])
-    #expect(csv == "recorded_at_utc,total_bytes,used_bytes,free_bytes,used_percent\n2026-10-27T10:01:00Z,100,60,40,60.0000\n")
+    #expect(csv == "recorded_at_utc,total_bytes,used_bytes,free_bytes,used_percent,available_bytes,estimated_reclaimable_bytes,physical_used_bytes,capacity_basis\n2026-10-27T10:01:00Z,100,60,40,60.0000,,,60,physical_free\n")
     #expect(CSVExport.text([]).split(separator: "\n").count == 1)
+}
+
+@Test func reclaimableCapacityIsNotCountedAsDailyUsage() throws {
+    let reading = try DiskSample(date: Date(), totalBytes: 1_000_000_000_000,
+                                 freeBytes: 10_000_000_000, availableBytes: 360_000_000_000)
+    #expect(reading.usedBytes == 640_000_000_000)
+    #expect(reading.physicalUsedBytes == 990_000_000_000)
+    #expect(reading.estimatedReclaimableBytes == 350_000_000_000)
+    #expect(reading.fraction == 0.64)
+    #expect(reading.capacityBasis == "important_usage_available")
+}
+
+@Test func missingEstimateStaysExplicitAndInvalidEstimatesFail() throws {
+    let legacy = try sample("2026-10-27T10:01:00Z")
+    #expect(legacy.availableBytes == nil)
+    #expect(legacy.estimatedReclaimableBytes == nil)
+    #expect(legacy.usedBytes == legacy.physicalUsedBytes)
+    #expect(HistoryMetric.estimatedUsed.bytes(for: legacy) == nil)
+    #expect(throws: DiskPulseError.self) {
+        try DiskSample(date: Date(), totalBytes: 100, freeBytes: 10, availableBytes: 101)
+    }
+    #expect(throws: DiskPulseError.self) {
+        try DiskSample(date: Date(), totalBytes: 100, freeBytes: 10, availableBytes: -1)
+    }
+}
+
+private func legacyDatabase(at url: URL, version: Int = 1) throws {
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    var database: OpaquePointer?
+    try #require(sqlite3_open(url.path, &database) == SQLITE_OK)
+    defer { sqlite3_close(database) }
+    let timestamp = date("2026-10-27T10:00:00Z").timeIntervalSince1970
+    try #require(sqlite3_exec(database, """
+        CREATE TABLE samples(hour INTEGER PRIMARY KEY, recorded_at REAL NOT NULL,
+                             total_bytes INTEGER NOT NULL, free_bytes INTEGER NOT NULL);
+        INSERT INTO samples VALUES (\(Int64(timestamp)), \(timestamp), 100, 10);
+        PRAGMA user_version=\(version);
+        """, nil, nil, nil) == SQLITE_OK)
+}
+
+@Test func versionOneMigrationPreservesHistoryAndPersistsNewEstimates() throws {
+    try withStore { url in
+        try legacyDatabase(at: url)
+        do {
+            let store = try HistoryStore(url: url)
+            let old = try #require(store.samples().first)
+            #expect(old.freeBytes == 10 && old.usedBytes == 90)
+            #expect(old.availableBytes == nil)
+            try store.save(DiskSample(date: date("2026-10-27T11:00:00Z"), totalBytes: 100,
+                                      freeBytes: 10, availableBytes: 36), calendar: utcCalendar())
+        }
+        let store = try HistoryStore(url: url)
+        let rows = try store.samples()
+        #expect(rows.count == 2)
+        #expect(rows[0].availableBytes == nil)
+        #expect(rows[1].availableBytes == 36 && rows[1].freeBytes == 10 && rows[1].usedBytes == 64)
+        // 零是有效读数，不能误读成旧版的缺失值。
+        try store.save(DiskSample(date: date("2026-10-27T11:15:00Z"), totalBytes: 100,
+                                  freeBytes: 0, availableBytes: 0), calendar: utcCalendar())
+        #expect(try store.samples().last?.availableBytes == 0)
+    }
+}
+
+@Test func futureDatabaseVersionIsNotDowngraded() throws {
+    try withStore { url in
+        try legacyDatabase(at: url, version: 99)
+        #expect(throws: DiskPulseError.self) { _ = try HistoryStore(url: url) }
+        var database: OpaquePointer?
+        try #require(sqlite3_open(url.path, &database) == SQLITE_OK)
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        try #require(sqlite3_prepare_v2(database, "PRAGMA user_version;", -1, &statement, nil) == SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        try #require(sqlite3_step(statement) == SQLITE_ROW)
+        #expect(sqlite3_column_int(statement, 0) == 99)
+    }
+}
+
+@Test func historyNeverMixesPhysicalAndEstimatedUsage() throws {
+    let old = try sample("2026-10-27T10:01:00Z", free: 10)
+    let new = try DiskSample(date: date("2026-10-27T11:01:00Z"), totalBytes: 100, freeBytes: 10, availableBytes: 36)
+    let adjusted = HistoryPoint.make(from: [old, new], metric: .estimatedUsed)
+    #expect(adjusted.count == 1 && adjusted.first?.bytes == 64)
+    let physical = HistoryPoint.make(from: [old, new], metric: .physicalUsed)
+    #expect(physical.map(\.bytes) == [90, 90])
+    #expect(physical.map(\.segment) == [0, 0])
+}
+
+@Test func exportsIncludeBothCapacityMeanings() throws {
+    let reading = try DiskSample(date: date("2026-10-27T10:01:00Z"), totalBytes: 100,
+                                 freeBytes: 10, availableBytes: 36)
+    let csv = CSVExport.text([reading])
+    #expect(csv.hasSuffix("2026-10-27T10:01:00Z,100,64,10,64.0000,36,26,90,important_usage_available\n"))
+    let data = try JSONEncoder().encode(reading)
+    let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["usedBytes"] as? Int == 64)
+    #expect(json["physicalUsedBytes"] as? Int == 90)
+    #expect(try JSONDecoder().decode(DiskSample.self, from: data) == reading)
 }
 
 @Test func corruptHistoryIsNotSilentlyReset() throws {

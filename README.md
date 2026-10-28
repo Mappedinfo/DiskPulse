@@ -8,7 +8,7 @@
 
 ## 安装与使用
 
-**[下载 DiskPulse 0.1.0 安装包](https://github.com/Mappedinfo/DiskPulse/releases/download/v0.1.0/DiskPulse-macOS-universal.zip)** · [查看所有版本](https://github.com/Mappedinfo/DiskPulse/releases)
+**[下载 DiskPulse 0.1.1 安装包](https://github.com/Mappedinfo/DiskPulse/releases/download/v0.1.1/DiskPulse-macOS-universal.zip)** · [查看所有版本](https://github.com/Mappedinfo/DiskPulse/releases)
 
 系统要求：macOS 14 或更新版本，Apple Silicon／Intel Mac。下载上述 ZIP 即可安装，无需 Xcode、Swift、Homebrew 或自行编译。
 
@@ -38,9 +38,11 @@
 - 每小时一行；启动、唤醒或手动记录会更新本小时这一行。暂停期间仍可手动记录。
 - 电脑关机、休眠或应用退出期间没有观测，历史保留空缺；唤醒后只记录当前小时，不推算遗漏的容量。
 - 定时器允许系统延后约 20 秒执行以减少唤醒；写入失败会显示错误并在 5 分钟内重试。
-- 已用容量 = 数据卷总容量 − 数据卷可用容量。使用十进制 GB／TB；APFS 共享空间、快照及可清除空间会影响数值，与“系统设置”的分类统计可能不同。
+- 主显示“已使用（估算）”= 数据卷总容量 − 系统重要用途可用空间估算（`volumeAvailableCapacityForImportantUsage`）。此可用估算包含 macOS 能按需回收的空间。使用十进制 GB／TB；系统设置的分类统计、刷新时间与卷范围可能不同，不保证逐字节一致。
+- “容量明细”同时显示纯空闲、物理占用和可回收估算。物理占用 = 总容量 − 纯空闲；可回收估算 = 系统可用估算 − 纯空闲（下限为零）。后者不能直接视为 Time Machine 快照的精确大小。
+- 趋势图可切换“已用空间”和“物理占用”。0.1.0 的历史只含物理容量，升级保留原始记录，系统可用估算留空；这些记录可在“物理占用”下查看，不与新口径混画，也不倒推或伪造旧值。系统暂未提供估算时，主显示明确回退为“物理占用”。
 - 菜单栏小动画播放约 1 秒，仅在记录完成或打开面板时触发。可关闭；系统“减少动态效果”或低电量模式下跳过菜单栏动画。
-- 历史长期保留，面板只加载最近 30 天；CSV 导出包含全部小时记录，时间使用 UTC，容量保留原始字节数。
+- 历史长期保留，面板只加载最近 30 天；CSV 导出包含全部小时记录，时间使用 UTC，容量保留原始字节数。`free_bytes` 始终为纯空闲；新增 `available_bytes`、`estimated_reclaimable_bytes`、`physical_used_bytes`、`capacity_basis` 区分两种统计口径，旧记录缺失的估算字段为空。
 
 数据存放在 `~/Library/Application Support/DiskPulse/history.sqlite`。容量 API 仅读取卷的元数据，不扫描目录或读取文件内容；应用不上传数据。
 
@@ -79,16 +81,20 @@ cd DiskPulse
 
 ## 项目状态
 
-当前版本为 0.1.0。功能覆盖小时采样、本地持久化、容量趋势、菜单栏短动画、暂停与手动记录、CSV 导出、可选登录启动和应用打包。
+当前版本为 0.1.1，修正了把可回收空间计入主显示“已使用”的问题。功能覆盖小时采样、本地持久化、双口径容量趋势、菜单栏短动画、暂停与手动记录、CSV 导出、可选登录启动和应用打包。
+
+2026-10-28 的 14 项核心测试已通过，包含可回收空间计量、旧数据库无损升级、缺失估算回退、两种历史口径分离及 CSV／JSON 导出。本机历史库副本迁移后，原有行与原始容量字段保持一致；arm64 和 Rosetta 下的 x86_64 真实读取均通过。0.1.1 的迁移保留旧记录，数据库版本升级为 2；系统可用估算缺失时不伪造数据。
 
 2026-10-27 已通过 release 构建、8 项核心测试、应用签名校验、本机真实采样／小时去重／CSV 读回和数据库完整性检查；本机安装与首次自动记录也已验证。通用安装包包含 arm64 和 x86_64，解压后通过双架构签名校验、arm64 真实采样与 CSV 读回、Rosetta 下的 x86_64 容量读取。实测环境为 Apple Silicon、macOS 27.0.1、Swift 6.4；尚未在 Intel 实机或 macOS 14 上运行验证。
 
-通用应用约 1.3 MB，ZIP 约 0.4 MB。初次 arm64 版本启动后的单次空闲抽样约 27 MB 常驻内存，不能视为长期性能测量。
+通用应用约 1.4 MB，ZIP 约 0.4 MB。初次 arm64 版本启动后的单次空闲抽样约 27 MB 常驻内存，不能视为长期性能测量。
 
 尚未完成界面交互验收，以及登录启动、跨休眠、跨整点的长期运行验证；核心时间边界和持久化逻辑已通过测试。安装包通过 GitHub Release 分发，当前仍缺少 Developer ID 签名和 Apple 公证。
 
 ## 系统接口依据
 
 - [Apple：卷的可用容量](https://developer.apple.com/documentation/foundation/urlresourcekey/volumeavailablecapacitykey)
+- [Apple：重要用途可用空间](https://developer.apple.com/documentation/foundation/urlresourcevalues/volumeavailablecapacityforimportantusage)
+- [Apple：Time Machine 本地快照计入可用空间](https://support.apple.com/en-gb/102154)
 - [Apple：主应用登录启动](https://developer.apple.com/documentation/servicemanagement/smappservice/mainapp)
 - [Apple：隐私清单的 API 使用理由](https://developer.apple.com/documentation/bundleresources/app-privacy-configuration/nsprivacyaccessedapitypes/nsprivacyaccessedapitype)

@@ -16,6 +16,15 @@ public final class HistoryStore {
         do {
             sqlite3_busy_timeout(database, 3_000)
             try execute("PRAGMA journal_mode=WAL;")
+            let version = try prepare("PRAGMA user_version;")
+            let versionResult = sqlite3_step(version)
+            let versionNumber = sqlite3_column_int(version, 0)
+            sqlite3_finalize(version)
+            guard versionResult == SQLITE_ROW else { throw error() }
+            guard versionNumber <= 2 else {
+                throw DiskPulseError.database("记录来自更新版本，请先更新 DiskPulse。")
+            }
+            try execute("BEGIN IMMEDIATE;")
             try execute("""
                 CREATE TABLE IF NOT EXISTS samples (
                     hour INTEGER PRIMARY KEY,
@@ -23,9 +32,22 @@ public final class HistoryStore {
                     total_bytes INTEGER NOT NULL CHECK(total_bytes > 0),
                     free_bytes INTEGER NOT NULL CHECK(free_bytes >= 0 AND free_bytes <= total_bytes)
                 );
-                PRAGMA user_version=1;
                 """)
+            let columns = try prepare("PRAGMA table_info(samples);")
+            var hasAvailable = false
+            var result = sqlite3_step(columns)
+            while result == SQLITE_ROW {
+                if String(cString: sqlite3_column_text(columns, 1)) == "available_bytes" { hasAvailable = true }
+                result = sqlite3_step(columns)
+            }
+            sqlite3_finalize(columns)
+            guard result == SQLITE_DONE else { throw error() }
+            if !hasAvailable {
+                try execute("ALTER TABLE samples ADD COLUMN available_bytes INTEGER CHECK(available_bytes >= 0 AND available_bytes <= total_bytes);")
+            }
+            try execute("PRAGMA user_version=2; COMMIT;")
         } catch {
+            try? execute("ROLLBACK;")
             sqlite3_close(database)
             database = nil
             throw error
@@ -36,20 +58,23 @@ public final class HistoryStore {
 
     public func save(_ sample: DiskSample, calendar: Calendar = .current) throws {
         let statement = try prepare("""
-            INSERT INTO samples(hour, recorded_at, total_bytes, free_bytes) VALUES (?, ?, ?, ?)
+            INSERT INTO samples(hour, recorded_at, total_bytes, free_bytes, available_bytes) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(hour) DO UPDATE SET
-                recorded_at=excluded.recorded_at, total_bytes=excluded.total_bytes, free_bytes=excluded.free_bytes;
+                recorded_at=excluded.recorded_at, total_bytes=excluded.total_bytes,
+                free_bytes=excluded.free_bytes, available_bytes=excluded.available_bytes;
             """)
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, Int64(HourlySchedule.start(of: sample.date, calendar: calendar).timeIntervalSince1970))
         sqlite3_bind_double(statement, 2, sample.date.timeIntervalSince1970)
         sqlite3_bind_int64(statement, 3, sample.totalBytes)
         sqlite3_bind_int64(statement, 4, sample.freeBytes)
+        if let available = sample.availableBytes { sqlite3_bind_int64(statement, 5, available) }
+        else { sqlite3_bind_null(statement, 5) }
         guard sqlite3_step(statement) == SQLITE_DONE else { throw error() }
     }
 
     public func samples(since date: Date = .distantPast) throws -> [DiskSample] {
-        let statement = try prepare("SELECT recorded_at, total_bytes, free_bytes FROM samples WHERE recorded_at >= ? ORDER BY recorded_at;")
+        let statement = try prepare("SELECT recorded_at, total_bytes, free_bytes, available_bytes FROM samples WHERE recorded_at >= ? ORDER BY recorded_at;")
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_double(statement, 1, date.timeIntervalSince1970)
         var rows: [DiskSample] = []
@@ -59,7 +84,8 @@ public final class HistoryStore {
                 rows.append(try DiskSample(
                     date: Date(timeIntervalSince1970: sqlite3_column_double(statement, 0)),
                     totalBytes: sqlite3_column_int64(statement, 1),
-                    freeBytes: sqlite3_column_int64(statement, 2)
+                    freeBytes: sqlite3_column_int64(statement, 2),
+                    availableBytes: sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 3)
                 ))
             case SQLITE_DONE: return rows
             default: throw error()
@@ -135,9 +161,11 @@ public actor Recorder {
 public enum CSVExport {
     public static func text(_ samples: [DiskSample]) -> String {
         let format = ISO8601DateFormatter()
-        var text = "recorded_at_utc,total_bytes,used_bytes,free_bytes,used_percent\n"
+        var text = "recorded_at_utc,total_bytes,used_bytes,free_bytes,used_percent,available_bytes,estimated_reclaimable_bytes,physical_used_bytes,capacity_basis\n"
         for sample in samples {
-            text += "\(format.string(from: sample.date)),\(sample.totalBytes),\(sample.usedBytes),\(sample.freeBytes),\(String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), sample.fraction * 100))\n"
+            let available = sample.availableBytes.map(String.init) ?? ""
+            let reclaimable = sample.estimatedReclaimableBytes.map(String.init) ?? ""
+            text += "\(format.string(from: sample.date)),\(sample.totalBytes),\(sample.usedBytes),\(sample.freeBytes),\(String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), sample.fraction * 100)),\(available),\(reclaimable),\(sample.physicalUsedBytes),\(sample.capacityBasis)\n"
         }
         return text
     }
@@ -146,18 +174,20 @@ public enum CSVExport {
 public struct HistoryPoint: Identifiable, Sendable {
     public let sample: DiskSample
     public let segment: Int
+    public let bytes: Int64
     public var id: Date { sample.date }
 
-    public static func make(from samples: [DiskSample]) -> [HistoryPoint] {
+    public static func make(from samples: [DiskSample], metric: HistoryMetric = .physicalUsed) -> [HistoryPoint] {
         var segment = 0
         var previous: Date?
-        return samples.map { sample in
+        return samples.compactMap { sample in
+            guard let bytes = metric.bytes(for: sample) else { return nil }
             if let previous,
                HourlySchedule.start(of: sample.date).timeIntervalSince(HourlySchedule.start(of: previous)) > 3_601 {
                 segment += 1
             }
             previous = sample.date
-            return HistoryPoint(sample: sample, segment: segment)
+            return HistoryPoint(sample: sample, segment: segment, bytes: bytes)
         }
     }
 }
